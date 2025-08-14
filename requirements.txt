@@ -1,3 +1,4 @@
 streamlit
 openai>=1.40.0
-pydub
+pydub==0.25.1
+pyaudioop
