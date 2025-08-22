@@ -86,6 +86,90 @@ def cut_to_memory(path: str, start_s: float, end_s: float, fmt: str = "mp3") -> 
     proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return proc.stdout
 
+
+# --- Pomocnicze do diarizacji 2‑ścieżkowej ---
+
+def detect_silence_intervals(path: str, silence_thresh_db: int, min_silence_ms: int):
+    """
+    Alias do istniejącej u Ciebie funkcji detect_silences(...),
+    tak aby kod wywiadu mógł z niej korzystać pod nową nazwą.
+    Zwraca listę (start_silence, end_silence) w sekundach.
+    """
+    return detect_silences(path, silence_thresh_db, min_silence_ms)
+
+def speech_from_silence(total_dur: float, silences: list[tuple[float, float]]):
+    """
+    Odwraca ciszę → listę segmentów mowy (start, end) w sekundach.
+    """
+    if not silences:
+        return [(0.0, round(total_dur, 3))]
+    segs = []
+    cursor = 0.0
+    for s, e in sorted(silences):
+        if s > cursor:
+            segs.append((cursor, s))
+        cursor = max(cursor, e)
+    if cursor < total_dur:
+        segs.append((cursor, total_dur))
+    # filtruj mikro‑ogonki
+    return [(round(a, 3), round(b, 3)) for (a, b) in segs if (b - a) > 0.05]
+
+def coalesce_segments(segs: list[tuple[float, float]],
+                      min_speech_ms: int,
+                      gap_merge_ms: int,
+                      pad_ms: int,
+                      total_dur: float):
+    """
+    Odrzuca zbyt krótką mowę, skleja segmenty rozdzielone małą przerwą
+    i dodaje „pad” na brzegach.
+    """
+    min_s = min_speech_ms / 1000.0
+    gap_s = gap_merge_ms / 1000.0
+    pad_s = pad_ms / 1000.0
+
+    # odrzuć zbyt krótkie segmenty mowy
+    segs = [(a, b) for (a, b) in segs if (b - a) >= min_s]
+    if not segs:
+        return []
+
+    # sklej bliskie segmenty
+    merged = []
+    ca, cb = segs[0]
+    for a, b in segs[1:]:
+        if a - cb <= gap_s:
+            cb = b
+        else:
+            merged.append((ca, cb))
+            ca, cb = a, b
+    merged.append((ca, cb))
+
+    # dodaj pad i przytnij do długości nagrania
+    padded = []
+    for a, b in merged:
+        aa = max(0.0, a - pad_s)
+        bb = min(total_dur, b + pad_s)
+        padded.append((round(aa, 3), round(bb, 3)))
+    return padded
+
+def cap_segments(segs: list[tuple[float, float]], max_seg_s: int):
+    """
+    Dzieli za długie monologi na kawałki ≤ max_seg_s (sekundy),
+    aby nie przekraczać limitów modelu STT.
+    """
+    out = []
+    for a, b in segs:
+        dur = b - a
+        if dur <= max_seg_s:
+            out.append((a, b))
+        else:
+            start = a
+            while start < b:
+                end = min(b, start + max_seg_s)
+                out.append((round(start, 3), round(end, 3)))
+                start = end
+    return out
+
+
 # =========================
 # LOGIKA DZIELENIA (1-ścieżka)
 # =========================
