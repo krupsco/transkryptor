@@ -319,43 +319,80 @@ st.header("🎤 Wywiad (2 ścieżki) – automatyczny podział na rozmówców")
 
 colA, colB = st.columns(2)
 with colA:
-    file_A = st.file_uploader("Ścieżka A (rozmówca 1)", type=["mp3","wav","m4a","aac","mp4","ogg","webm"], key="uA")
+    file_A = st.file_uploader(
+        "Ścieżka A (rozmówca 1)",
+        type=["mp3","wav","m4a","aac","mp4","ogg","webm"],
+        key="uA"
+    )
 with colB:
-    file_B = st.file_uploader("Ścieżka B (rozmówca 2)", type=["mp3","wav","m4a","aac","mp4","ogg","webm"], key="uB")
+    file_B = st.file_uploader(
+        "Ścieżka B (rozmówca 2)",
+        type=["mp3","wav","m4a","aac","mp4","ogg","webm"],
+        key="uB"
+    )
 
 name_A = st.text_input("Imię rozmówcy 1 (dla ścieżki A)", value="Rozmówca A")
 name_B = st.text_input("Imię rozmówcy 2 (dla ścieżki B)", value="Rozmówca B")
 
 st.caption("Wskazówka: to powinny być dwie równoległe ścieżki z tego samego nagrania (np. mikrofony lav A/B).")
 
-# Ustawienia dla trybu 2-ścieżkowego
-with st.expander("Ustawienia (2 ścieżki)"):
-    chunk_win_s = st.slider("Długość okna transkrypcji (s)", 10, 120, 30, step=5,
-                            help="Mniejsze okno = lepsze „przeplatanie” kwestii, większy koszt zapytań.")
+# Ustawienia diarizacji dla 2 ścieżek
+with st.expander("Ustawienia diarizacji (2 ścieżki)"):
+    silence_thresh_db_dual = st.slider(
+        "Próg ciszy (dBFS)", -60, -10, -36, step=1, key="dual_thr",
+        help="Im bliżej 0, tym mniej wrażliwy na ciszę (mniej segmentów mowy)."
+    )
+    min_silence_ms_dual = st.slider(
+        "Min. długość ciszy (ms)", 200, 3000, 800, step=50, key="dual_min_sil",
+        help="Krótsze wartości = więcej cięć; dłuższe = dłuższe segmenty mowy."
+    )
+    min_speech_ms_dual  = st.slider(
+        "Min. długość mowy (ms)", 200, 5000, 1200, step=100, key="dual_min_sp",
+        help="Od skrócenia monologów i odrzucania bardzo krótkich wtrąceń."
+    )
+    gap_merge_ms_dual   = st.slider(
+        "Scal przerwy < (ms)", 100, 3000, 600, step=50, key="dual_gap",
+        help="Scalaj segmenty mowy rozdzielone krótką ciszą."
+    )
+    pad_ms_dual         = st.slider(
+        "Pad na brzegach segmentu (ms)", 0, 2000, 250, step=50, key="dual_pad",
+        help="Dodaj zapas czasu na początku/końcu segmentu."
+    )
+    max_seg_s_dual      = st.slider(
+        "Maks. czas pojedynczego segmentu (s)", 120, 1200, 480, step=30, key="dual_cap",
+        help="Jeśli monolog dłuższy (np. 5–8 min), potnij go na kawałki ≤ ten limit."
+    )
 
-run_dual = st.button("🔁 Zrób transkrypcję wywiadu (2 ścieżki)", use_container_width=True,
-                     disabled=not (file_A and file_B))
+run_dual = st.button(
+    "🔁 Zrób transkrypcję wywiadu (2 ścieżki)",
+    use_container_width=True,
+    disabled=not (file_A and file_B)
+)
 
-def split_fixed_windows(total_dur: float, win_s: int) -> List[Tuple[float, float]]:
-    out = []
-    start = 0.0
-    while start < total_dur:
-        end = min(total_dur, start + win_s)
-        out.append((round(start,3), round(end,3)))
-        start = end
-    return out
+def merge_dialogs(a_list: List[Dict], b_list: List[Dict]) -> List[str]:
+    """
+    Łączy dwie listy segmentów (A i B) w jedną kolejkę dialogową wg czasu.
+    Przy nakładaniu pokazuje oba wpisy (najpierw wcześniejszy start).
+    """
+    all_items = a_list + b_list
+    all_items.sort(key=lambda x: (x["start"], x["speaker"]))
+    lines = []
+    for item in all_items:
+        label = f"[{format_ts(int(item['start']))}–{format_ts(int(item['end']))}]"
+        lines.append(f"{label} {item['speaker']}: {item['text']}")
+    return lines
 
 if run_dual and file_A and file_B:
     try:
+        import tempfile
         with st.spinner("Wczytywanie i weryfikacja długości…"):
-            import tempfile
+            # Zapisz uploady do plików tymczasowych
             with tempfile.NamedTemporaryFile(suffix=os.path.splitext(file_A.name)[1], delete=False) as tmpA:
-                tmpA.write(file_A.read())
-                pathA = tmpA.name
+                tmpA.write(file_A.read()); pathA = tmpA.name
             with tempfile.NamedTemporaryFile(suffix=os.path.splitext(file_B.name)[1], delete=False) as tmpB:
-                tmpB.write(file_B.read())
-                pathB = tmpB.name
+                tmpB.write(file_B.read()); pathB = tmpB.name
 
+            # Sprawdź długości
             durA = ffprobe_duration_seconds(pathA)
             durB = ffprobe_duration_seconds(pathB)
             tol = 2.0  # sekundy
@@ -363,54 +400,56 @@ if run_dual and file_A and file_B:
                 st.error(f"Długości ścieżek różnią się o więcej niż {tol}s: A={durA:.2f}s, B={durB:.2f}s. "
                          "Upewnij się, że to równoległe nagrania z tego samego wywiadu.")
                 st.stop()
-
             total = min(durA, durB)
 
-        # dzielimy na równe okna czasowe
-        windows = split_fixed_windows(total, chunk_win_s)
-        combined_lines: List[str] = []
-        prog = st.progress(0.0, text="Transkrypcja okien…")
+        # 1) Wykryj ciszę → mowa (per ścieżka), sklej, dopaduj, cap
+        with st.spinner("Wykrywanie mowy na ścieżkach A/B…"):
+            # A
+            silA = detect_silence_intervals(pathA, silence_thresh_db_dual, min_silence_ms_dual)
+            spA  = speech_from_silence(total, silA)
+            spA  = coalesce_segments(spA, min_speech_ms_dual, gap_merge_ms_dual, pad_ms_dual, total)
+            spA  = cap_segments(spA, max_seg_s_dual)
+            # B
+            silB = detect_silence_intervals(pathB, silence_thresh_db_dual, min_silence_ms_dual)
+            spB  = speech_from_silence(total, silB)
+            spB  = coalesce_segments(spB, min_speech_ms_dual, gap_merge_ms_dual, pad_ms_dual, total)
+            spB  = cap_segments(spB, max_seg_s_dual)
 
-        for idx, (a, b) in enumerate(windows, start=1):
-            # wytnij okno z A i B
-            blobA = cut_to_memory(pathA, a, b, fmt="mp3")
-            blobB = cut_to_memory(pathB, a, b, fmt="mp3")
+        # 2) Transkrybuj tylko segmenty mowy
+        with st.spinner("Transkrypcja segmentów A…"):
+            progA = st.progress(0.0, text="A…")
+            partsA: List[Dict] = []
+            for i,(a,b) in enumerate(spA, start=1):
+                blob = cut_to_memory(pathA, a, b, fmt="mp3")
+                txt  = transcribe_bytes(blob, f"A_{int(a):06d}-{int(b):06d}.mp3", language, model_transcribe).strip()
+                if txt:
+                    partsA.append({"start":a,"end":b,"speaker":name_A,"text":txt})
+                progA.progress(i/len(spA) if spA else 1.0, text=f"A {i}/{len(spA)}")
+            progA.empty()
 
-            # transkrybuj każde niezależnie
-            textA = transcribe_bytes(blobA, f"A_{int(a):06d}-{int(b):06d}.mp3", language, model_transcribe).strip()
-            textB = transcribe_bytes(blobB, f"B_{int(a):06d}-{int(b):06d}.mp3", language, model_transcribe).strip()
+        with st.spinner("Transkrypcja segmentów B…"):
+            progB = st.progress(0.0, text="B…")
+            partsB: List[Dict] = []
+            for i,(a,b) in enumerate(spB, start=1):
+                blob = cut_to_memory(pathB, a, b, fmt="mp3")
+                txt  = transcribe_bytes(blob, f"B_{int(a):06d}-{int(b):06d}.mp3", language, model_transcribe).strip()
+                if txt:
+                    partsB.append({"start":a,"end":b,"speaker":name_B,"text":txt})
+                progB.progress(i/len(spB) if spB else 1.0, text=f"B {i}/{len(spB)}")
+            progB.empty()
 
-            label = f"[{format_ts(int(a))}–{format_ts(int(b))}]"
-            # heurystyka: wyświetl w kolejności – kto „mówi więcej” w tym oknie idzie pierwszy
-            lenA, lenB = len(textA), len(textB)
-            if lenA == 0 and lenB == 0:
-                # nic się nie dzieje w tym oknie – pomiń
-                pass
-            elif lenA >= lenB:
-                if lenA > 0:
-                    combined_lines.append(f"{label} {name_A}: {textA}")
-                if lenB > 0:
-                    combined_lines.append(f"{label} {name_B}: {textB}")
-            else:
-                if lenB > 0:
-                    combined_lines.append(f"{label} {name_B}: {textB}")
-                if lenA > 0:
-                    combined_lines.append(f"{label} {name_A}: {textA}")
-
-            prog.progress(idx/len(windows), text=f"Okno {idx}/{len(windows)}")
-
-        prog.empty()
-
-        dialog_text = "\n\n".join(combined_lines)
+        # 3) Zmerguj po czasie (nakładki pokazujemy obie linie)
+        dialog_lines = merge_dialogs(partsA, partsB)
+        dialog_text  = "\n\n".join(dialog_lines)
         dialog_clean = remove_fillers(dialog_text) if rm_fill else dialog_text
 
-        # pokaż i zapisz w tych samych polach (żeby działał przycisk „Stwórz skrót i cytaty”)
+        # 4) Wyświetl i wstaw do sesji (żeby działało „Stwórz skrót i cytaty”)
         st.session_state["transcribed_text"] = dialog_text
         st.session_state["clean_text"] = dialog_clean
 
         st.success("Transkrypcja wywiadu gotowa ✅ (2 ścieżki)")
         st.subheader("📄 Wywiad – transkrypcja (surowa)")
-        st.text_area("Tekst", dialog_text, height=320)
+        st.text_area("Tekst", dialog_text, height=360)
 
         st.subheader("🧹 Wywiad – po czyszczeniu (opcjonalnie)")
         st.caption("Usunięte wypełniacze i korekta interpunkcji.")
@@ -419,4 +458,5 @@ if run_dual and file_A and file_B:
     except Exception as e:
         st.error(f"Błąd transkrypcji wywiadu: {e}")
 
-st.caption("Wskazówki: w trybie 2 ścieżek skracaj okno (np. 20–30 s), aby lepiej „przeplatać” kwestie rozmówców.")
+st.caption("Wskazówki: zwiększ „Scal przerwy < …ms” i „Pad …ms”, gdy dialog wygląda na poszatkowany. "
+           "Obniż próg ciszy (np. −40 dBFS), jeśli segmenty mowy są zbyt krótkie.")
